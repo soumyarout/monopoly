@@ -1,13 +1,35 @@
-// Visit /api/debug to check if Supabase is connected and the table is accessible
+// Visit /api/debug to check connection status.
+// If something is broken it will tell you exactly why and how to fix it.
+
 export async function GET() {
-  const url   = process.env.SUPABASE_URL;
-  const key   = process.env.SUPABASE_ANON_KEY;
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_ANON_KEY;
 
   if (!url || !key) {
-    return Response.json({ ok: false, error: "SUPABASE_URL or SUPABASE_ANON_KEY not set" });
+    return Response.json({
+      ok: false,
+      error: "SUPABASE_URL or SUPABASE_ANON_KEY not set in Vercel environment variables.",
+    });
   }
 
-  // 1. Try writing a test key
+  // 1. Check if table exists
+  const tableRes = await fetch(`${url}/rest/v1/kv?limit=0`, {
+    headers: { apikey: key, Authorization: `Bearer ${key}` },
+    cache: "no-store",
+  });
+
+  if (!tableRes.ok) {
+    const body = await tableRes.json().catch(() => ({}));
+    return Response.json({
+      ok: false,
+      step: "table_check",
+      error: body,
+      fix: "Visit /api/setup to auto-create the table (needs SUPABASE_ACCESS_TOKEN env var) or run the SQL manually in Supabase SQL Editor.",
+      sql: "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);\nALTER TABLE kv DISABLE ROW LEVEL SECURITY;",
+    });
+  }
+
+  // 2. Try writing
   const writeRes = await fetch(`${url}/rest/v1/kv`, {
     method: "POST",
     headers: {
@@ -19,37 +41,31 @@ export async function GET() {
     body: JSON.stringify({ key: "__debug__", value: "ok" }),
     cache: "no-store",
   });
-  const writeBody = await writeRes.json().catch(() => ({}));
 
   if (!writeRes.ok) {
+    const body = await writeRes.json().catch(() => ({}));
     return Response.json({
       ok: false,
       step: "write",
-      status: writeRes.status,
-      error: writeBody,
-      fix: "Run this in Supabase SQL Editor: ALTER TABLE kv DISABLE ROW LEVEL SECURITY;",
+      error: body,
+      fix: "RLS is blocking writes. Visit /api/setup or run: ALTER TABLE kv DISABLE ROW LEVEL SECURITY;",
     });
   }
 
-  // 2. Try reading it back
-  const readRes = await fetch(
-    `${url}/rest/v1/kv?key=eq.__debug__&select=value`,
-    {
-      headers: { apikey: key, Authorization: `Bearer ${key}` },
-      cache: "no-store",
-    }
-  );
-  const readBody = await readRes.json().catch(() => ({}));
+  // 3. Try reading back
+  const readRes = await fetch(`${url}/rest/v1/kv?key=eq.__debug__&select=value`, {
+    headers: { apikey: key, Authorization: `Bearer ${key}` },
+    cache: "no-store",
+  });
+  const rows = await readRes.json().catch(() => []);
 
-  if (!readRes.ok || !Array.isArray(readBody) || readBody.length === 0) {
+  if (!readRes.ok || !rows[0]?.value) {
     return Response.json({
       ok: false,
       step: "read",
-      status: readRes.status,
-      error: readBody,
-      fix: "Run this in Supabase SQL Editor: ALTER TABLE kv DISABLE ROW LEVEL SECURITY;",
+      fix: "RLS is blocking reads. Run: ALTER TABLE kv DISABLE ROW LEVEL SECURITY;",
     });
   }
 
-  return Response.json({ ok: true, message: "Supabase is connected and working!" });
+  return Response.json({ ok: true, message: "✅ Supabase connected, table works, reads and writes OK!" });
 }
