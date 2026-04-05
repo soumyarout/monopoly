@@ -1,51 +1,70 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 
-// Storage backend priority:
-// 1. Supabase   — set SUPABASE_URL + SUPABASE_ANON_KEY  (free, no credit card)
-//                 Run once in Supabase SQL editor:
-//                   CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-// 2. JSON file  — local dev default, zero setup (saves to game-data.json)
+// Storage backend (auto-detected from env vars):
+//
+//  Vercel  → Supabase Storage (no SQL, no table, self-initialising)
+//            Needs: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
+//            (both are on the same page: Supabase → Project Settings → API)
+//
+//  Local   → JSON file (game-data.json). Zero setup.
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY;
+const SUPABASE_URL  = process.env.SUPABASE_URL;
+const SERVICE_KEY   = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const BUCKET        = "gamedata";
 
-// ── Supabase (Vercel / production) ────────────────────────────────────────────
+// ── Supabase Storage (Vercel) ─────────────────────────────────────────────────
 
-async function supabaseGet(key) {
+let bucketEnsured = false;
+
+async function ensureBucket() {
+  if (bucketEnsured) return;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/bucket`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SERVICE_KEY}`,
+      apikey: SERVICE_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ id: BUCKET, name: BUCKET, public: false }),
+    cache: "no-store",
+  });
+  // ok = just created | 400 "already exists" = also fine
+  bucketEnsured = true;
+}
+
+async function storageGet(key) {
+  await ensureBucket();
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/kv?key=eq.${encodeURIComponent(key)}&select=value`,
+    `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${encodeURIComponent(key)}`,
     {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-      },
+      headers: { Authorization: `Bearer ${SERVICE_KEY}`, apikey: SERVICE_KEY },
       cache: "no-store",
     }
   );
-  const body = await res.json();
-  if (!res.ok) {
-    console.error("[storage] supabaseGet error:", JSON.stringify(body));
-    return null;
-  }
-  return body[0]?.value ?? null;
+  if (!res.ok) return null;
+  return await res.text();
 }
 
-async function supabaseSet(key, value) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/kv`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates",
-    },
-    body: JSON.stringify({ key, value }),
-    cache: "no-store",
-  });
+async function storageSet(key, value) {
+  await ensureBucket();
+  const res = await fetch(
+    `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${encodeURIComponent(key)}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SERVICE_KEY}`,
+        apikey: SERVICE_KEY,
+        "Content-Type": "text/plain",
+        "x-upsert": "true",
+      },
+      body: value,
+      cache: "no-store",
+    }
+  );
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    console.error("[storage] supabaseSet error:", JSON.stringify(body));
+    const err = await res.json().catch(() => ({}));
+    console.error("[storage] storageSet error:", JSON.stringify(err));
   }
 }
 
@@ -72,12 +91,12 @@ function fileSet(key, value) {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 async function kvGet(key) {
-  if (SUPABASE_URL && SUPABASE_KEY) return supabaseGet(key);
+  if (SUPABASE_URL && SERVICE_KEY) return storageGet(key);
   return fileGet(key);
 }
 
 async function kvSet(key, value) {
-  if (SUPABASE_URL && SUPABASE_KEY) return supabaseSet(key, value);
+  if (SUPABASE_URL && SERVICE_KEY) return storageSet(key, value);
   fileSet(key, value);
 }
 
