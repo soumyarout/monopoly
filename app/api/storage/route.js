@@ -1,59 +1,89 @@
-// In-memory store — works for local dev (all players on the same server process).
-// For Vercel (serverless), set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN
-// to get a shared persistent store across function invocations.
-const localStore = new Map();
+import { readFileSync, writeFileSync, existsSync } from "fs";
+import { join } from "path";
 
-const REDIS_URL   = process.env.UPSTASH_REDIS_REST_URL;
-const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+// Storage backend priority:
+// 1. Supabase   — set SUPABASE_URL + SUPABASE_ANON_KEY  (free, no credit card)
+//                 Run once in Supabase SQL editor:
+//                   CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+// 2. JSON file  — local dev default, zero setup (saves to game-data.json)
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY;
+
+// ── Supabase (Vercel / production) ────────────────────────────────────────────
+
+async function supabaseGet(key) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/kv?key=eq.${encodeURIComponent(key)}&select=value`,
+    {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+      },
+      cache: "no-store",
+    }
+  );
+  const rows = await res.json();
+  return rows[0]?.value ?? null;
+}
+
+async function supabaseSet(key, value) {
+  await fetch(`${SUPABASE_URL}/rest/v1/kv`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ key, value }),
+    cache: "no-store",
+  });
+}
+
+// ── JSON file (local dev) ─────────────────────────────────────────────────────
+
+const DATA_FILE = join(process.cwd(), "game-data.json");
+
+function fileGet(key) {
+  if (!existsSync(DATA_FILE)) return null;
+  try {
+    return JSON.parse(readFileSync(DATA_FILE, "utf8"))[key] ?? null;
+  } catch { return null; }
+}
+
+function fileSet(key, value) {
+  let data = {};
+  if (existsSync(DATA_FILE)) {
+    try { data = JSON.parse(readFileSync(DATA_FILE, "utf8")); } catch {}
+  }
+  data[key] = value;
+  writeFileSync(DATA_FILE, JSON.stringify(data), "utf8");
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
 
 async function kvGet(key) {
-  if (REDIS_URL && REDIS_TOKEN) {
-    const res = await fetch(REDIS_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${REDIS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(["GET", key]),
-      cache: "no-store",
-    });
-    const data = await res.json();
-    return data.result ?? null;
-  }
-  return localStore.get(key) ?? null;
+  if (SUPABASE_URL && SUPABASE_KEY) return supabaseGet(key);
+  return fileGet(key);
 }
 
 async function kvSet(key, value) {
-  if (REDIS_URL && REDIS_TOKEN) {
-    await fetch(REDIS_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${REDIS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      // Store for 2 hours then auto-expire
-      body: JSON.stringify(["SET", key, value, "EX", "7200"]),
-      cache: "no-store",
-    });
-  } else {
-    localStore.set(key, value);
-  }
+  if (SUPABASE_URL && SUPABASE_KEY) return supabaseSet(key, value);
+  fileSet(key, value);
 }
 
-export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  const key = searchParams.get("key");
-  if (!key) return Response.json({ error: "Missing key" }, { status: 400 });
+// ── Route handlers ────────────────────────────────────────────────────────────
 
-  const value = await kvGet(key);
-  return Response.json({ value });
+export async function GET(request) {
+  const key = new URL(request.url).searchParams.get("key");
+  if (!key) return Response.json({ error: "Missing key" }, { status: 400 });
+  return Response.json({ value: await kvGet(key) });
 }
 
 export async function POST(request) {
-  const body = await request.json();
-  const { key, value } = body;
+  const { key, value } = await request.json();
   if (!key) return Response.json({ error: "Missing key" }, { status: 400 });
-
   await kvSet(key, value);
   return Response.json({ ok: true });
 }

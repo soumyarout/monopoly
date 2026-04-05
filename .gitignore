@@ -13,6 +13,9 @@ out/
 # Vercel
 .vercel
 
+# Local game data (auto-generated, not for git)
+game-data.json
+
 # OS
 .DS_Store
 Thumbs.db
