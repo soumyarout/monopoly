@@ -23,12 +23,16 @@ async function supabaseGet(key) {
       cache: "no-store",
     }
   );
-  const rows = await res.json();
-  return rows[0]?.value ?? null;
+  const body = await res.json();
+  if (!res.ok) {
+    console.error("[storage] supabaseGet error:", JSON.stringify(body));
+    return null;
+  }
+  return body[0]?.value ?? null;
 }
 
 async function supabaseSet(key, value) {
-  await fetch(`${SUPABASE_URL}/rest/v1/kv`, {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/kv`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_KEY,
@@ -39,6 +43,10 @@ async function supabaseSet(key, value) {
     body: JSON.stringify({ key, value }),
     cache: "no-store",
   });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    console.error("[storage] supabaseSet error:", JSON.stringify(body));
+  }
 }
 
 // ── JSON file (local dev) ─────────────────────────────────────────────────────
